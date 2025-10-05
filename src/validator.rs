@@ -100,7 +100,6 @@ fn get_jwks(jwks_uri: &str) -> Result<Arc<jwk::JwkSet>, String> {
 #[derive(Debug, Deserialize, Clone)]
 struct Claims {
     sub: String,
-    scope: Option<String>,
 }
 
 fn validate_jwt(token: &str, config: &Config) -> Result<String, String> {
@@ -129,17 +128,6 @@ fn validate_jwt(token: &str, config: &Config) -> Result<String, String> {
 
     let token_data: TokenData<Claims> = decode(token, &decoding_key, &validation)
         .map_err(|e| format!("JWT validation failed: {}", e))?;
-
-    // Validate required scope
-    if let Some(required_scope) = &config.oauth_scope {
-        if let Some(scopes) = &token_data.claims.scope {
-            if !scopes.split_whitespace().any(|s| s == required_scope) {
-                return Err(format!("Token missing required scope '{}'", required_scope));
-            }
-        } else {
-            return Err(format!("Token missing required scope '{}'", required_scope));
-        }
-    }
 
     Ok(token_data.claims.sub)
 }

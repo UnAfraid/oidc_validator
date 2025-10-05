@@ -38,11 +38,9 @@ pub struct OAuthValidatorCallbacks {
 pub const PG_OAUTH_VALIDATOR_MAGIC: u64 = 0x20250220;
 
 extern "C" fn startup(state: *mut ValidatorModuleState) {
-    pgrx::info!("oidc validator startup");
     if state.is_null() {
         return;
     }
-    pgrx::info!("oidc validator loading config from environment...");
 
     let config =  Config::new_from_env();
     let boxed = Box::new(config);
@@ -52,7 +50,6 @@ extern "C" fn startup(state: *mut ValidatorModuleState) {
 }
 
 extern "C" fn shutdown(state: *mut ValidatorModuleState) {
-    pgrx::info!("oidc validator shutdown");
     unsafe {
         if !(*state).private_data.is_null() {
             let _boxed: Box<Config> = Box::from_raw((*state).private_data as *mut Config);
@@ -63,21 +60,16 @@ extern "C" fn shutdown(state: *mut ValidatorModuleState) {
 
 extern "C" fn validate(
     state: *const ValidatorModuleState,
-    token_ptr: *const ::std::os::raw::c_char, // we don't use token in this dumb example
+    token_ptr: *const ::std::os::raw::c_char,
     role_ptr: *const ::std::os::raw::c_char,
     result: *mut ValidatorModuleResult,
 ) -> bool {
-    pgrx::info!("oidc validator validate");
-    // task-1: extract per-authentication parameters into Rust
     let (config, token, role) = match unsafe { get_args(state, token_ptr, role_ptr, result) } {
         Ok(args) => args,
         Err(_) => return false,
     };
-    // task-2: run your validation logic in safe Rust
     let (authorized, authn_id) = safe_validate(config, &token, &role);
-    // task-3: write the result back into the C structures
     unsafe { set_result(result, authorized, authn_id) };
-    // Internal errors should return 'false'; this example returns 'true' for simplicity
     true
 }
 
@@ -101,7 +93,7 @@ unsafe fn get_args(
 
     // Initialize result
     (*result).authorized = false;
-    (*result).authn_id = std::ptr::null_mut();
+    (*result).authn_id = ptr::null_mut();
 
     // Extract configuration
     let config = &*((*state).private_data as *const Config);
