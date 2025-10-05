@@ -1,88 +1,166 @@
 use crate::config::Config;
+use jsonwebtoken::{decode, decode_header, jwk, DecodingKey, TokenData, Validation};
 use serde::Deserialize;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 
-#[derive(Deserialize)]
-struct AuthentikIntrospectionResponse {
-    active: bool,
-    sub: Option<String>,
-    scope: Option<String>,
-    aud: Option<String>,
+// --- Caching Infrastructure ---
+
+#[derive(Clone, Deserialize)]
+struct OidcWellKnown {
+    jwks_uri: String,
 }
 
-pub fn safe_validate(config: &Config, token: &str, role: &str) -> (bool, Option<String>) {
-    // Extract OAuth parameters from config
-    let introspection_url = match &config.oauth_issuer {
-        Some(url) => format!("{}/introspect/", url.trim_end_matches('/')),
-        None => {
-            pgrx::warning!("OAuth issuer is not configured in Config");
-            return (false, None);
+static JWKS_URI_CACHE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+static JWKS_CACHE: OnceLock<Mutex<HashMap<String, Arc<jwk::JwkSet>>>> = OnceLock::new();
+
+fn get_jwks_uri_cache() -> &'static Mutex<HashMap<String, String>> {
+    JWKS_URI_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn get_jwks_cache() -> &'static Mutex<HashMap<String, Arc<jwk::JwkSet>>> {
+    JWKS_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+// --- OIDC Discovery & JWKS Fetching ---
+
+fn discover_jwks_uri(issuer: &str) -> Result<String, String> {
+    // Check cache first
+    {
+        let cache = get_jwks_uri_cache().lock().unwrap();
+        if let Some(uri) = cache.get(issuer) {
+            return Ok(uri.clone());
         }
-    };
+    }
 
-    let client_id = match &config.oauth_client_id {
-        Some(cid) => cid,
-        None => {
-            pgrx::warning!("OAuth client_id is not configured in Config");
-            return (false, None);
+    // If not in cache, perform discovery
+    pgrx::info!("Performing OIDC discovery for issuer: {}", issuer);
+    let wellknown_url = format!(
+        "{}/.well-known/openid-configuration",
+        issuer.trim_end_matches('/')
+    );
+
+    let resp = reqwest::blocking::get(&wellknown_url)
+        .map_err(|e| format!("Failed to fetch OIDC well-known config: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!(
+            "Failed to fetch OIDC well-known config: status {}",
+            resp.status()
+        ));
+    }
+
+    let config: OidcWellKnown = resp
+        .json()
+        .map_err(|e| format!("Failed to parse OIDC well-known config: {}", e))?;
+    let jwks_uri = config.jwks_uri;
+
+    // Store in cache
+    {
+        let mut cache = get_jwks_uri_cache().lock().unwrap();
+        cache.insert(issuer.to_string(), jwks_uri.clone());
+    }
+
+    Ok(jwks_uri)
+}
+
+fn get_jwks(jwks_uri: &str) -> Result<Arc<jwk::JwkSet>, String> {
+    // Check cache first
+    {
+        let cache = get_jwks_cache().lock().unwrap();
+        if let Some(jwks) = cache.get(jwks_uri) {
+            return Ok(jwks.clone());
         }
-    };
+    }
 
-    let client_secret = match &config.oauth_client_secret {
-        Some(sec) => sec,
-        None => {
-            pgrx::warning!("OAuth client_secret is not configured in Config");
-            return (false, None);
+    // If not in cache, fetch JWKS
+    pgrx::info!("Fetching JWKS from: {}", jwks_uri);
+    let resp = reqwest::blocking::get(jwks_uri).map_err(|e| format!("Failed to fetch JWKS: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("Failed to fetch JWKS: status {}", resp.status()));
+    }
+
+    let jwks: jwk::JwkSet = resp
+        .json()
+        .map_err(|e| format!("Failed to parse JWKS: {}", e))?;
+    let jwks_arc = Arc::new(jwks);
+
+    // Store in cache
+    {
+        let mut cache = get_jwks_cache().lock().unwrap();
+        cache.insert(jwks_uri.to_string(), jwks_arc.clone());
+    }
+
+    Ok(jwks_arc)
+}
+
+// --- JWT Validation ---
+
+#[derive(Debug, Deserialize, Clone)]
+struct Claims {
+    sub: String,
+    scope: Option<String>,
+}
+
+fn validate_jwt(token: &str, config: &Config) -> Result<String, String> {
+    let issuer = config
+        .oauth_issuer
+        .as_ref()
+        .ok_or("OAuth issuer not configured")?;
+    let jwks_uri = discover_jwks_uri(issuer)?;
+
+    let header = decode_header(token).map_err(|e| format!("Invalid JWT header: {}", e))?;
+    let kid = header.kid.ok_or("JWT missing 'kid' in header")?;
+
+    let jwks = get_jwks(&jwks_uri)?;
+    let jwk = jwks.find(&kid).ok_or(format!("JWK not found for kid: {}", kid))?;
+
+    let mut validation = Validation::new(header.alg);
+    validation.set_issuer(&[issuer]);
+
+    if let Some(audience) = &config.oauth_audience {
+        validation.set_audience(&[audience.as_str()]);
+    } else {
+        validation.validate_aud = false;
+    }
+
+    let decoding_key = DecodingKey::from_jwk(jwk).map_err(|e| format!("Failed to create decoding key from JWK: {}", e))?;
+
+    let token_data: TokenData<Claims> = decode(token, &decoding_key, &validation)
+        .map_err(|e| format!("JWT validation failed: {}", e))?;
+
+    // Validate required scope
+    if let Some(required_scope) = &config.oauth_scope {
+        if let Some(scopes) = &token_data.claims.scope {
+            if !scopes.split_whitespace().any(|s| s == required_scope) {
+                return Err(format!("Token missing required scope '{}'", required_scope));
+            }
+        } else {
+            return Err(format!("Token missing required scope '{}'", required_scope));
         }
-    };
+    }
 
-    // Perform introspection request
-    let client = reqwest::blocking::Client::new();
-    let params = [
-        ("token", token),
-        ("client_id", client_id),
-        ("client_secret", client_secret),
-    ];
+    Ok(token_data.claims.sub)
+}
 
-    let resp = match client.post(&introspection_url).form(&params).send() {
-        Ok(r) => r,
-        Err(err) => {
-            pgrx::warning!("Failed to contact introspection endpoint: {}", err);
-            return (false, None);
-        }
-    };
+// --- Main Validation Logic ---
 
-    let data: AuthentikIntrospectionResponse = match resp.json() {
-        Ok(d) => d,
-        Err(err) => {
-            pgrx::warning!("Failed to parse introspection response: {}", err);
-            return (false, None);
-        }
-    };
-
-    if !data.active {
+pub fn safe_validate(config: &Config, token: &str, _role: &str) -> (bool, Option<String>) {
+    // This validator only supports JWTs that can be validated client-side.
+    if token.matches('.').count() != 2 {
+        pgrx::warning!("Token does not appear to be a JWT. This validator only supports JWTs.");
         return (false, None);
     }
 
-    // Validate audience if provided
-    if let Some(aud) = &data.aud {
-        if let Some(expected_aud) = &config.oauth_audience {
-            if aud != expected_aud {
-                pgrx::warning!("Token audience {} does not match expected {}", aud, expected_aud);
-                return (false, None);
-            }
+    match validate_jwt(token, config) {
+        Ok(authn_id) => {
+            pgrx::info!("Successfully validated token client-side as JWT");
+            (true, Some(authn_id))
+        }
+        Err(e) => {
+            pgrx::warning!("JWT validation failed: {}", e);
+            (false, None)
         }
     }
-
-    // Validate required scope
-    if let Some(scopes) = &data.scope {
-        if let Some(required_scope) = &config.oauth_scope {
-            if !scopes.split_whitespace().any(|s| s == required_scope) {
-                pgrx::warning!("Token missing required scope '{}'", required_scope);
-                return (false, None);
-            }
-        }
-    }
-
-    let authn_id = data.sub.unwrap_or_else(|| role.to_string());
-    (true, Some(authn_id))
 }
