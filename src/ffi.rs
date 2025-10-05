@@ -1,7 +1,6 @@
 use crate::config::Config;
 use crate::validator::safe_validate;
 use pgrx::pg_sys::pstrdup;
-use std::collections::HashMap;
 use std::ffi::{c_void, CStr, CString};
 use std::ptr;
 
@@ -9,7 +8,6 @@ use std::ptr;
 pub struct ValidatorModuleState {
     pub sversion: ::std::os::raw::c_int,
     pub private_data: *mut ::std::os::raw::c_void,
-    pub options: *const *const std::os::raw::c_char,
 }
 
 #[repr(C)]
@@ -37,60 +35,24 @@ pub struct OAuthValidatorCallbacks {
 }
 
 // Magic constant (matches PG_OAUTH_VALIDATOR_MAGIC in C)
-pub const PG_OAUTH_VALIDATOR_MAGIC: u64 = 0x1234_5678_9ABC_DEF0;
-
-unsafe fn get_hba_options(state: *const ValidatorModuleState) -> HashMap<String, String> {
-    let mut map = HashMap::new();
-
-    if state.is_null() || (*state).options.is_null() {
-        return map; // no options
-    }
-
-    let mut i = 0;
-    loop {
-        let opt_ptr = *(*state).options.add(i);
-        if opt_ptr.is_null() {
-            break; // null-terminated
-        }
-
-        let opt_cstr = CStr::from_ptr(opt_ptr);
-        if let Ok(opt_str) = opt_cstr.to_str() {
-            // split "key=value" into (key, value)
-            if let Some(eq_pos) = opt_str.find('=') {
-                let key = &opt_str[..eq_pos];
-                let value = &opt_str[eq_pos + 1..];
-                map.insert(key.to_string(), value.to_string());
-            }
-        }
-
-        i += 1;
-    }
-
-    map
-}
+pub const PG_OAUTH_VALIDATOR_MAGIC: u64 = 0x20250220;
 
 extern "C" fn startup(state: *mut ValidatorModuleState) {
-    pgrx::info!("my validator startup");
+    pgrx::info!("oidc validator startup");
     if state.is_null() {
         return;
     }
-    let conn_params: HashMap<String, String> = unsafe { get_hba_options(state) };
+    pgrx::info!("oidc validator loading config from environment...");
 
-    match Config::new_from_conn_params(&conn_params) {
-        Ok(module_state) => unsafe {
-            let boxed = Box::new(module_state);
-            (*state).private_data = Box::into_raw(boxed) as *mut c_void;
-        },
-        Err(e) => {
-            // fail to init: log it，but not FATAL to avoid let PG goto recovery mode :sob:
-            pgrx::warning!("my validator startup: {}", e);
-            // private_data remains null, which is handled gracefully in other functions
-        }
+    let config =  Config::new_from_env();
+    let boxed = Box::new(config);
+    unsafe {
+        (*state).private_data = Box::into_raw(boxed) as *mut c_void;
     }
 }
 
 extern "C" fn shutdown(state: *mut ValidatorModuleState) {
-    pgrx::info!("my validator shutdown");
+    pgrx::info!("oidc validator shutdown");
     unsafe {
         if !(*state).private_data.is_null() {
             let _boxed: Box<Config> = Box::from_raw((*state).private_data as *mut Config);
@@ -105,6 +67,7 @@ extern "C" fn validate(
     role_ptr: *const ::std::os::raw::c_char,
     result: *mut ValidatorModuleResult,
 ) -> bool {
+    pgrx::info!("oidc validator validate");
     // task-1: extract per-authentication parameters into Rust
     let (config, token, role) = match unsafe { get_args(state, token_ptr, role_ptr, result) } {
         Ok(args) => args,

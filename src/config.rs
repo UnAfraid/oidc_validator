@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 
 #[derive(Default)]
 pub struct Config {
@@ -10,13 +9,13 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn new_from_conn_params(conn_params: &HashMap<String, String>) -> Result<Self, String> {
-        Ok(Config {
-            oauth_issuer: conn_params.get("issuer").cloned().or_else(|| std::env::var("PGOAUTH_ISSUER").ok()),
-            oauth_client_id: conn_params.get("client_id").cloned().or_else(|| std::env::var("PGOAUTH_CLIENT_ID").ok()),
-            oauth_client_secret: conn_params.get("client_secret").cloned().or_else(|| std::env::var("PGOAUTH_CLIENT_SECRET").ok()),
-            oauth_scope: conn_params.get("scope").cloned().or_else(|| std::env::var("PGOAUTH_SCOPE").ok()),
-            oauth_audience: conn_params.get("audience").cloned().or_else(|| std::env::var("PGOAUTH_AUDIENCE").ok()),
-        })
+    pub fn new_from_env() -> Self {
+        Config {
+            oauth_issuer: std::env::var("POSTGRES_OIDC_ISSUER").ok(),
+            oauth_client_id: std::env::var("POSTGRES_OIDC_CLIENT_ID").ok(),
+            oauth_client_secret: std::env::var("POSTGRES_OIDC_CLIENT_SECRET").ok(),
+            oauth_scope: std::env::var("POSTGRES_OIDC_SCOPE").ok(),
+            oauth_audience: std::env::var("POSTGRES_OIDC_AUDIENCE").ok(),
+        }
     }
 }
