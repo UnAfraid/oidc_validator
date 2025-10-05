@@ -3,6 +3,9 @@ use jsonwebtoken::{decode, decode_header, jwk, DecodingKey, TokenData, Validatio
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
+use reqwest::Url;
+
+const WELL_KNOWN_ENDPOINT: &'static str = "/.well-known/openid-configuration";
 
 // --- Caching Infrastructure ---
 
@@ -35,12 +38,11 @@ fn discover_jwks_uri(issuer: &str) -> Result<String, String> {
 
     // If not in cache, perform discovery
     pgrx::info!("Performing OIDC discovery for issuer: {}", issuer);
-    let wellknown_url = format!(
-        "{}/.well-known/openid-configuration",
-        issuer.trim_end_matches('/')
-    );
+    let issuer_url = Url::parse(issuer).expect("Issuer URI is invalid");
+    let well_known_url = issuer_url.join(WELL_KNOWN_ENDPOINT)
+        .map_err(|e| format!("Failed to join issuer url with well known url: {:?}", e))?;
 
-    let resp = reqwest::blocking::get(&wellknown_url)
+    let resp = reqwest::blocking::get(well_known_url)
         .map_err(|e| format!("Failed to fetch OIDC well-known config: {}", e))?;
 
     if !resp.status().is_success() {
