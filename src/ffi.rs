@@ -134,7 +134,7 @@ unsafe fn set_result(
             }
             Err(_) => {
                 pgrx::warning!(
-                    "my validator: authentication ID contains null bytes, setting to null"
+                    "oidc validator: authentication ID contains null bytes, setting to null"
                 );
                 (*result).authn_id = ptr::null_mut();
             }
