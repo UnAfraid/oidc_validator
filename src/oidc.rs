@@ -12,7 +12,8 @@ struct OidcWellKnown {
 }
 
 fn discover_jwks_uri(issuer: &str) -> Result<String, String> {
-    let issuer_url = Url::parse(issuer).expect("Issuer URI is invalid");
+    let issuer_url = Url::parse(issuer)
+        .map_err(|e| format!("Failed to parse issuer url: {:?}", e))?;
     let well_known_url = issuer_url.join(WELL_KNOWN_ENDPOINT)
         .map_err(|e| format!("Failed to join issuer url with well known url: {:?}", e))?;
 
@@ -38,8 +39,8 @@ fn discover_jwks_uri(issuer: &str) -> Result<String, String> {
 
 fn get_jwks(jwks_uri: &str) -> Result<Arc<jwk::JwkSet>, String> {
     pgrx::info!("Fetching JWKS from: {}", jwks_uri);
-    let resp = reqwest::blocking::get(jwks_uri).map_err(|e| format!("Failed to fetch JWKS: {}", e))?;
-
+    let resp = reqwest::blocking::get(jwks_uri)
+        .map_err(|e| format!("Failed to fetch JWKS: {}", e))?;
     if !resp.status().is_success() {
         return Err(format!("Failed to fetch JWKS: status {}", resp.status()));
     }
